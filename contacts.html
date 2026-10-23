@@ -16,7 +16,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap&subset=cyrillic" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/style.css?v=3">
 <noscript><style>.reveal{opacity:1;transform:none}</style></noscript>
 </head>
 <body>
@@ -48,7 +48,7 @@
 <div class="full"><label for="c-car">Автомобиль</label><input id="c-car" name="car" type="text" placeholder="Марка, модель, год"></div>
 <div class="full"><label for="c-msg">Сообщение</label><textarea id="c-msg" name="msg" placeholder="Расстояние до щитка, пожелания по бюджету…"></textarea></div>
 <label class="check full"><input type="checkbox" name="consent" required> <span>Я ознакомился с <a href="privacy.html" target="_blank" rel="noopener">Политикой конфиденциальности</a> и <a href="personal-data.html" target="_blank" rel="noopener">Политикой обработки персональных данных</a> и даю согласие на обработку моих персональных данных, в том числе на их передачу через мессенджер Telegram.</span></label>
-<div class="hp" aria-hidden="true"><label>Не заполняйте это поле<input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
+<div class="hp" aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"><label>Не заполняйте это поле<input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
 <div class="full"><button class="btn btn-primary" type="submit">Отправить заявку</button></div>
 </div></form>
 <div class="form-ok" role="status">Спасибо! Заявка принята, мы свяжемся с вами в ближайшее время.</div><div class="form-err" role="alert">Не удалось отправить заявку. Позвоните +375 29 537-71-31 или напишите в Telegram @electrifyminsk.</div>
@@ -84,6 +84,6 @@
 <a class="btn btn-outline" style="color:#fff;border-color:rgba(255,255,255,.35)" href="tel:+375295377131">Позвонить</a>
 <a class="btn btn-primary" href="https://t.me/electrifyminsk" rel="noopener">Написать</a>
 </div>
-<script src="assets/main.js"></script>
+<script src="assets/main.js?v=3"></script>
 </body>
 </html>
