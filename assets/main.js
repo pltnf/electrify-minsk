@@ -85,18 +85,66 @@
     recalc();
   }
 
-  /* ---------- Формы заявок ----------
-     ЗАГЛУШКА: сейчас форма только показывает сообщение об успехе.
-     Для боевой версии замените на отправку (fetch на ваш API / Telegram-бот / CRM). */
+  /* ---------- Формы заявок -> Telegram (через прокси) ----------
+     Токен бота НЕ хранится в коде сайта: форма отправляет JSON на LEAD_ENDPOINT,
+     а прокси (см. electrify-lead-proxy) добавляет токен и пересылает сообщение в группу Telegram.
+     Впишите адрес прокси ниже. Пока адрес пустой, форма покажет сообщение «Не удалось отправить». */
+  var LEAD_ENDPOINT = '';
+  var pageLoaded = Date.now();
+
+  function fieldLabel(form, el) {
+    var l = el.id ? form.querySelector('label[for="' + el.id + '"]') : null;
+    return l ? l.childNodes[0].textContent.trim() : el.name;
+  }
+
+  function collect(form) {
+    var fields = [];
+    Array.prototype.forEach.call(form.elements, function (el) {
+      if (!el.name || el.name === 'website' || el.type === 'checkbox' || el.type === 'submit' || el.tagName === 'BUTTON') return;
+      var v = (el.value || '').trim();
+      if (v) fields.push({ label: fieldLabel(form, el), value: v.slice(0, 1500) });
+    });
+    return { fields: fields, consent: true, page: document.title, url: location.href };
+  }
+
+  function sendLead(payload) {
+    if (!LEAD_ENDPOINT) return Promise.reject(new Error('no endpoint'));
+    return fetch(LEAD_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (r) { if (!r.ok) throw new Error('http ' + r.status); });
+  }
+
   document.querySelectorAll('form[data-lead]').forEach(function (form) {
+    var box = form.parentElement;
+    var ok = box.querySelector('.form-ok');
+    var err = box.querySelector('.form-err');
+    var btn = form.querySelector('button[type=submit]');
+    var phone = form.querySelector('input[name=phone]');
+    if (phone) phone.addEventListener('input', function () { phone.setCustomValidity(''); });
     form.addEventListener('submit', function (e) {
       e.preventDefault();
+      if (ok) ok.style.display = 'none';
+      if (err) err.style.display = 'none';
+      if (phone) {
+        var digits = phone.value.replace(/\D/g, '');
+        phone.setCustomValidity(digits.length >= 9 ? '' : 'Укажите номер телефона полностью');
+      }
       if (!form.checkValidity()) { form.reportValidity(); return; }
-      var ok = form.parentElement.querySelector('.form-ok') || form.querySelector('.form-ok');
-      if (ok) ok.style.display = 'block';
-      form.querySelectorAll('input:not([type=checkbox]), textarea, select').forEach(function (el) { el.value = ''; });
-      var btn = form.querySelector('button[type=submit]');
-      if (btn) { btn.disabled = true; btn.textContent = 'Заявка отправлена'; }
+      var trap = form.querySelector('input[name=website]');
+      var isBot = (trap && trap.value) || (Date.now() - pageLoaded < 1500);
+      var label = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = 'Отправляем…'; }
+      var job = isBot ? Promise.resolve() : sendLead(collect(form));
+      job.then(function () {
+        if (ok) ok.style.display = 'block';
+        form.reset();
+        if (btn) btn.textContent = 'Заявка отправлена';
+      }).catch(function () {
+        if (err) err.style.display = 'block';
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+      });
     });
   });
 })();
