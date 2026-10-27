@@ -1,4 +1,13 @@
 User-agent: *
 Allow: /
+Disallow: /lead.php
+Disallow: /_
+
+# Яндекс: не индексировать дубли с UTM-метками
+User-agent: Yandex
+Allow: /
+Disallow: /lead.php
+Disallow: /_
+Clean-param: utm_source&utm_medium&utm_campaign&utm_content&utm_term&yclid&gclid&fbclid
 
 Sitemap: https://electrifyminsk.by/sitemap.xml

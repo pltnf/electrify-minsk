@@ -36,7 +36,7 @@
   if (y) y.textContent = new Date().getFullYear();
 
   /* ---------- Калькулятор ориентировочной стоимости ----------
-     ВСЕ ЦИФРЫ НИЖЕ — ориентиры для чернового макета. Замените на свои. */
+     Цены калькулятора (BYN) задаются здесь. */
   var CONFIG = {
     packages: {
       eco:   { name: 'Эконом (розетка + защищённая линия)', base: 650,  includedMeters: 10, perMeter: 20 },
@@ -85,11 +85,10 @@
     recalc();
   }
 
-  /* ---------- Формы заявок -> Telegram (через прокси) ----------
-     Токен бота НЕ хранится в коде сайта: форма отправляет JSON на LEAD_ENDPOINT,
-     а прокси (см. electrify-lead-proxy) добавляет токен и пересылает сообщение в группу Telegram.
-     Впишите адрес прокси ниже. Пока адрес пустой, форма покажет сообщение «Не удалось отправить». */
-  var LEAD_ENDPOINT = '';
+  /* ---------- Формы заявок -> Telegram ----------
+     Форма отправляет JSON на /lead.php (лежит на хостинге рядом с сайтом), скрипт добавляет
+     токен бота из lead-config.php и пересылает заявку в группу Telegram. Токена в этом файле нет. */
+  var LEAD_ENDPOINT = '/lead.php';
   var pageLoaded = Date.now();
 
   function fieldLabel(form, el) {
@@ -104,7 +103,9 @@
       var v = (el.value || '').trim();
       if (v) fields.push({ label: fieldLabel(form, el), value: v.slice(0, 1500) });
     });
-    return { fields: fields, consent: true, page: document.title, url: location.href };
+    var trap = form.querySelector('input[name=website]');
+    // hp и t сервер проверяет ещё раз: так ботов, которые шлют запрос напрямую, тоже отсеиваем
+    return { fields: fields, consent: true, page: document.title, url: location.href, hp: trap ? trap.value : '', t: Date.now() - pageLoaded };
   }
 
   function sendLead(payload) {
