@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""managic-report: build the "REPORT FOR JOA" block from `git log` on the current branch.
+
+Ticket ids come from commit subject prefixes: "[a1b2c3d4] fix: ..." (first 8 chars of the
+Managic ticket id). Commits without such a prefix are listed as unattributed.
+
+If MANAGIC_AGENT_KEY is set, one comment per ticket is also posted through the Managic
+agent API (status, branch, sha, test result). If it is missing, the report is only printed.
+The key is read from the environment only. It is never printed, logged or written to disk.
+
+Usage:
+  scripts/managic-report [--base REF] [--tests TEXT] [--status TEXT]
+                         [--ticket-status ID8=TEXT ...] [--no-post] [--dry-run]
+                         [--write-report [--force]]
+
+  --base REF           compare against REF (default: origin/<default_branch>, then <default_branch>)
+  --tests TEXT         test result to report (default: env MANAGIC_TESTS, else "not recorded")
+  --status TEXT        status for every ticket (default: "ready for review")
+  --ticket-status A=B  override the status of one ticket (repeatable)
+  --no-post            never post, even if MANAGIC_AGENT_KEY is set
+  --dry-run            show what would be posted, post nothing (needs no key)
+  --write-report       write a skeleton docs/reports/<branch>.md (refuses to overwrite)
+
+Env: MANAGIC_AGENT_KEY (secret, workspace-scoped agent key, scope comments:write + tasks:read)
+     MANAGIC_API_URL   (default https://api.managic.app/api/v1)
+     MANAGIC_TESTS     (default for --tests)
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_API = "https://api.managic.app/api/v1"
+TICKET_RE = re.compile(r"^\[([0-9a-fA-F]{8})\]\s*(.*)$")
+TASK_STATUSES = ("todo", "in_progress", "backlog", "done", "cancelled")
+MAX_REPORT_LINES = 25
+AUTHOR_LABEL = "Claude Code"
+
+
+def git(*args, check=True):
+    p = subprocess.run(["git", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if check and p.returncode != 0:
+        sys.exit("git %s failed: %s" % (" ".join(args), p.stderr.strip()))
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def load_config(root):
+    path = os.path.join(root, ".managic-agent.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read %s: %s" % (path, e))
+
+
+def pick_base(cfg, explicit):
+    if explicit:
+        return explicit
+    default = cfg.get("default_branch", "main")
+    for ref in ("origin/" + default, default):
+        if git("rev-parse", "--verify", "--quiet", ref, check=False):
+            return ref
+    sys.exit("no base ref found (tried origin/%s and %s); pass --base" % (default, default))
+
+
+def collect(base):
+    """Return (ordered ticket ids, {id: [commit]}, [unattributed commit]) for base..HEAD."""
+    out = git("log", "--reverse", "--format=%H%x1f%s", "%s..HEAD" % base)
+    tickets, order, loose = {}, [], []
+    for line in out.splitlines():
+        sha, _, subject = line.partition("\x1f")
+        m = TICKET_RE.match(subject)
+        commit = {"sha": sha, "short": sha[:8], "subject": (m.group(2) if m else subject).strip()}
+        if m:
+            tid = m.group(1).lower()
+            if tid not in tickets:
+                tickets[tid] = []
+                order.append(tid)
+            tickets[tid].append(commit)
+        else:
+            loose.append(commit)
+    return order, tickets, loose
+
+
+def parse_overrides(items):
+    out = {}
+    for item in items or []:
+        k, sep, v = item.partition("=")
+        if not sep or not re.fullmatch(r"[0-9a-fA-F]{8}", k.strip()):
+            sys.exit("--ticket-status expects ID8=TEXT, got %r" % item)
+        out[k.strip().lower()] = v.strip()
+    return out
+
+
+def build_report(cfg, branch, base, order, tickets, loose, status_of, tests):
+    n_commits = sum(len(v) for v in tickets.values()) + len(loose)
+    lines = [
+        "REPORT FOR JOA",
+        "repo: %s | %s/%s" % (cfg.get("repo", "?"), cfg.get("workspace", "?"), cfg.get("project", "?")),
+        "branch: %s (base %s)" % (branch, base),
+        "date: %s | commits: %d | tickets: %d" % (datetime.date.today().isoformat(), n_commits, len(order)),
+        "tests: %s" % tests,
+        "----",
+    ]
+    footer = []
+    if loose:
+        footer.append("WARNING %d commit(s) without a [ticket] prefix: %s" % (
+            len(loose), ", ".join(c["short"] for c in loose[:6]) + (" ..." if len(loose) > 6 else "")))
+    footer.append("Needs Nik: see docs/reports/%s.md" % branch.replace("/", "-"))
+    room = MAX_REPORT_LINES - len(lines) - len(footer)
+    if not order:
+        lines.append("(no ticket commits on this branch)")
+    shown = order if len(order) <= room else order[: max(room - 1, 0)]
+    for tid in shown:
+        cs = tickets[tid]
+        lines.append("[%s] %s | %d commit(s) | last %s | %s" % (
+            tid, status_of(tid), len(cs), cs[-1]["short"], cs[-1]["subject"][:60]))
+    if len(shown) < len(order):
+        lines.append("... +%d more ticket(s), see the report file" % (len(order) - len(shown)))
+    lines.extend(footer)
+    return lines[:MAX_REPORT_LINES]
+
+
+def write_report_file(root, cfg, branch, base, order, tickets, loose, status_of, tests, force):
+    rel = os.path.join("docs", "reports", branch.replace("/", "-") + ".md")
+    path = os.path.join(root, rel)
+    if os.path.exists(path) and not force:
+        print("note: %s exists, not overwritten (use --force)" % rel, file=sys.stderr)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    out = ["# %s" % branch, "",
+           "Repo: %s. Board: %s / %s. Base: %s." % (cfg.get("repo"), cfg.get("workspace"), cfg.get("project"), base), "",
+           "Tests (whole branch): %s" % tests, ""]
+    for tid in order:
+        cs = tickets[tid]
+        out += ["## [%s]" % tid, "",
+                "- Status: %s" % status_of(tid),
+                "- Commits: %s" % ", ".join(c["short"] for c in cs),
+                "- Tests: %s" % tests,
+                "- Risks: TODO",
+                "- Needs Nik: TODO (write 'nothing' if nothing)", "",
+                "What changed:"] + ["- %s (%s)" % (c["subject"], c["short"]) for c in cs] + [""]
+    if loose:
+        out += ["## Unattributed commits", ""] + ["- %s %s" % (c["short"], c["subject"]) for c in loose] + [""]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out))
+    print("wrote %s (fill in the TODOs)" % rel, file=sys.stderr)
+
+
+# ---- Managic agent API -------------------------------------------------------------------------
+
+class Api:
+    def __init__(self, base_url, key):
+        self.base_url = base_url.rstrip("/")
+        self._key = key
+
+    def _scrub(self, text):
+        return text.replace(self._key, "***") if self._key else text
+
+    def call(self, method, path, body=None):
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        for attempt in range(6):
+            req = urllib.request.Request(self.base_url + path, data=data, method=method, headers={
+                "Authorization": "Bearer " + self._key,
+                "Content-Type": "application/json",
+                "User-Agent": "managic-report",
+            })
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    raw = r.read().decode("utf-8")
+                    return json.loads(raw) if raw else None
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 5:
+                    time.sleep(int(e.headers.get("Retry-After") or 5 * (attempt + 1)))
+                    continue
+                detail = self._scrub(e.read().decode("utf-8", "replace"))[:200]
+                raise RuntimeError("%s %s -> HTTP %d %s" % (method, path, e.code, detail))
+            except urllib.error.URLError as e:
+                raise RuntimeError("%s %s -> %s" % (method, path, self._scrub(str(e.reason))))
+
+    def resolve_ids(self, prefixes):
+        """Map each 8-char prefix to the full task id by paging the task list."""
+        found, wanted = {}, set(prefixes)
+        for status in TASK_STATUSES:
+            offset = 0
+            while wanted - set(found):
+                page = self.call("GET", "/agent/tasks/list?status=%s&limit=200&offset=%d" % (status, offset)) or {}
+                tasks = page.get("tasks", []) if isinstance(page, dict) else page
+                for t in tasks:
+                    pre = str(t.get("id", ""))[:8].lower()
+                    if pre in wanted:
+                        found.setdefault(pre, set()).add(t["id"])
+                if not (isinstance(page, dict) and page.get("hasMore")) or not tasks:
+                    break
+                offset = page.get("nextOffset", offset + len(tasks))
+        return found
+
+    def existing_bodies(self, task_id):
+        try:
+            res = self.call("GET", "/agent/tasks/%s/comments" % task_id)
+        except RuntimeError:
+            return set()
+        items = res if isinstance(res, list) else (res or {}).get("comments", [])
+        return {str(c.get("body", "")) for c in items if isinstance(c, dict)}
+
+
+def comment_body(cfg, branch, tid, cs, status, tests):
+    repo = cfg.get("repo", "")
+    sha = cs[-1]["sha"]
+    link = "https://github.com/%s/commit/%s" % (repo, sha) if repo else sha
+    return "\n".join([
+        "status: %s" % status,
+        "branch: %s" % branch,
+        "sha: %s (%d commit(s), last: %s)" % (sha[:12], len(cs), cs[-1]["subject"][:80]),
+        "tests: %s" % tests,
+        "commit: %s" % link,
+    ])
+
+
+def post_comments(cfg, branch, order, tickets, status_of, tests, dry_run, key):
+    api = Api(os.environ.get("MANAGIC_API_URL", DEFAULT_API), key or "")
+    bodies = {tid: comment_body(cfg, branch, tid, tickets[tid], status_of(tid), tests) for tid in order}
+    if dry_run:
+        for tid in order:
+            print("[dry-run] would comment on %s:\n  %s" % (tid, bodies[tid].replace("\n", "\n  ")), file=sys.stderr)
+        return 0
+    failures = 0
+    try:
+        ids = api.resolve_ids(order)
+    except RuntimeError as e:
+        print("post failed while resolving tickets: %s" % e, file=sys.stderr)
+        return len(order)
+    for tid in order:
+        full = ids.get(tid, set())
+        if len(full) != 1:
+            print("skip %s: %s" % (tid, "not found on the board of this key" if not full else "prefix is ambiguous"), file=sys.stderr)
+            failures += 1
+            continue
+        task_id = next(iter(full))
+        if bodies[tid] in api.existing_bodies(task_id):
+            print("skip %s: identical comment already posted" % tid, file=sys.stderr)
+            continue
+        try:
+            api.call("POST", "/agent/tasks/%s/comments" % task_id, {"body": bodies[tid], "authorLabel": AUTHOR_LABEL})
+            print("posted comment on %s" % tid, file=sys.stderr)
+        except RuntimeError as e:
+            print("post failed for %s: %s" % (tid, e), file=sys.stderr)
+            failures += 1
+    return failures
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Build the REPORT FOR JOA block from git log.")
+    ap.add_argument("--base")
+    ap.add_argument("--tests", default=os.environ.get("MANAGIC_TESTS", "not recorded"))
+    ap.add_argument("--status", default="ready for review")
+    ap.add_argument("--ticket-status", action="append")
+    ap.add_argument("--no-post", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--write-report", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    args = ap.parse_args()
+
+    root = git("rev-parse", "--show-toplevel")
+    cfg = load_config(root)
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    base = pick_base(cfg, args.base)
+    order, tickets, loose = collect(base)
+    overrides = parse_overrides(args.ticket_status)
+
+    def status_of(tid):
+        return overrides.get(tid, args.status)
+
+    print("\n".join(build_report(cfg, branch, base, order, tickets, loose, status_of, args.tests)))
+
+    if args.write_report:
+        write_report_file(root, cfg, branch, base, order, tickets, loose, status_of, args.tests, args.force)
+
+    if args.no_post or not order:
+        return 0
+    key = os.environ.get("MANAGIC_AGENT_KEY", "").strip()
+    if not key and not args.dry_run:
+        print("MANAGIC_AGENT_KEY not set: report printed only, nothing posted.", file=sys.stderr)
+        return 0
+    return 2 if post_comments(cfg, branch, order, tickets, status_of, args.tests, args.dry_run, key) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
